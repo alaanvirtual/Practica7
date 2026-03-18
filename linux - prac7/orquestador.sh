@@ -3,7 +3,7 @@
 #   ORQUESTADOR FINAL - PRÁCTICA 7
 #   Autor: Infraestructura de Despliegue Profesional
 #   Dominio: reprobados.com
-#   Versión: 2.1
+#   Versión: 2.2
 # ============================================================
 
 # ============================
@@ -11,7 +11,7 @@
 # ============================
 FTP_USER="usuario"
 FTP_PASS="1234"
-FTP_SERVER="172.16.0.30"
+FTP_SERVER="192.168.100.1"
 BASE_FTP="ftp://$FTP_SERVER"
 DOMINIO="reprobados.com"
 CERT_DIR="/etc/ssl/reprobados"
@@ -98,114 +98,78 @@ menu_origen(){
 }
 
 # ============================================================
-#   PROBAR CONEXIÓN FTP
+#   PROBAR CONEXIÓN FTP (con SSL)
 # ============================================================
 probar_ftp(){
   log "${AZUL}🔌 Probando conexión FTP a $FTP_SERVER...${NC}"
-  curl --silent --fail --connect-timeout 5 --ftp-ssl --insecure -u "$FTP_USER:$FTP_PASS" "$BASE_FTP/" > /dev/null
+  curl --silent --fail --connect-timeout 5 \
+       --ftp-ssl --insecure \
+       -u "$FTP_USER:$FTP_PASS" \
+       "$BASE_FTP/" > /dev/null 2>&1
   if [ $? -ne 0 ]; then
-    log "${ROJO}❌ No se pudo conectar al FTP ($FTP_SERVER). Verifica credenciales y servidor.${NC}"
-    exit 1
+    log "${ROJO}❌ No se pudo conectar al FTP ($FTP_SERVER).${NC}"
+    log "${AMARILLO}  → IP configurada: $FTP_SERVER${NC}"
+    log "${AMARILLO}  → Usuario: $FTP_USER${NC}"
+    log "${AMARILLO}  → Verifica que vsftpd esté corriendo: systemctl status vsftpd${NC}"
+    return 1
   fi
   log "${VERDE}✅ Conexión FTP exitosa.${NC}"
 }
 
+# ============================================================
+#   LISTAR FTP (con SSL)
+# ============================================================
 listar_ftp(){
-  curl --silent --ftp-pasv --ftp-ssl --insecure -u "$FTP_USER:$FTP_PASS" "$1/" 2>/dev/null
+  curl --silent --ftp-pasv --ftp-ssl --insecure \
+       -u "$FTP_USER:$FTP_PASS" "$1/" 2>/dev/null
 }
 
 # ============================================================
-#   PREPARAR NGINX EN FTP AUTOMÁTICAMENTE
+#   CONFIGURAR VSFTPD CORRECTAMENTE
 # ============================================================
-preparar_nginx_ftp(){
-  log "${AZUL}🔍 Verificando si Nginx ya existe en el FTP...${NC}"
+configurar_vsftpd_base(){
+  log "${AZUL}⚙ Aplicando configuración base de vsftpd...${NC}"
+  mkdir -p /var/run/vsftpd/empty
 
-  # Verificar si ya existe la carpeta Nginx en el FTP
-  EXISTE=$(curl --silent --ftp-pasv --ftp-ssl --insecure -u "$FTP_USER:$FTP_PASS" "$BASE_FTP/http/Linux/" 2>/dev/null | grep -i "nginx")
+  cat > /etc/vsftpd.conf <<EOF
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+dirmessage_enable=YES
+use_localtime=YES
+xferlog_enable=YES
+connect_from_port_20=YES
+chroot_local_user=YES
+allow_writeable_chroot=YES
+secure_chroot_dir=/var/run/vsftpd/empty
+pam_service_name=vsftpd
+pasv_enable=YES
+pasv_min_port=40000
+pasv_max_port=40100
+EOF
+  log "${VERDE}✅ vsftpd.conf base aplicado.${NC}"
+}
 
-  if [ -n "$EXISTE" ]; then
-    log "${VERDE}✅ Carpeta Nginx ya existe en el FTP.${NC}"
-    return 0
+# ============================================================
+#   ASEGURAR vsftpd.conf BASE (solo si no existe)
+# ============================================================
+asegurar_vsftpd_conf(){
+  if [ ! -f /etc/vsftpd.conf ]; then
+    log "${AMARILLO}⚠ vsftpd.conf no encontrado, creando...${NC}"
+    configurar_vsftpd_base
   fi
-
-  log "${AMARILLO}⚠ Nginx no encontrado en FTP. Preparando automáticamente...${NC}"
-
-  # Paso 1: Descargar el .deb de Nginx
-  log "${AZUL}⬇ Descargando paquete Nginx desde APT...${NC}"
-  cd /tmp
-  apt-get download nginx 2>/dev/null
-
-  NGINX_DEB=$(ls /tmp/nginx_*.deb 2>/dev/null | head -1)
-
-  if [ -z "$NGINX_DEB" ]; then
-    log "${ROJO}❌ No se pudo descargar el paquete Nginx.${NC}"
-    return 1
-  fi
-
-  NGINX_FILENAME=$(basename "$NGINX_DEB")
-  log "${VERDE}✅ Paquete descargado: $NGINX_FILENAME${NC}"
-
-  # Paso 2: Generar el SHA256
-  log "${AZUL}🔐 Generando SHA256 de $NGINX_FILENAME...${NC}"
-  sha256sum "$NGINX_FILENAME" > "/tmp/$NGINX_FILENAME.sha256"
-  log "${VERDE}✅ SHA256 generado: $NGINX_FILENAME.sha256${NC}"
-
-  # Paso 3: Crear carpeta Nginx en el FTP
-  log "${AZUL}📁 Creando carpeta /http/Linux/Nginx en el FTP...${NC}"
-  curl --silent --ftp-pasv --ftp-ssl --insecure \
-    -u "$FTP_USER:$FTP_PASS" \
-    "$BASE_FTP/http/Linux/Nginx/" \
-    --ftp-create-dirs \
-    -T /dev/null > /dev/null 2>&1
-
-  # Paso 4: Subir el .deb al FTP
-  log "${AZUL}⬆ Subiendo $NGINX_FILENAME al FTP...${NC}"
-  curl --silent --ftp-pasv --ftp-ssl --insecure \
-    -u "$FTP_USER:$FTP_PASS" \
-    -T "/tmp/$NGINX_FILENAME" \
-    "$BASE_FTP/http/Linux/Nginx/$NGINX_FILENAME"
-
-  if [ $? -eq 0 ]; then
-    log "${VERDE}✅ $NGINX_FILENAME subido correctamente al FTP.${NC}"
-  else
-    log "${ROJO}❌ Error subiendo $NGINX_FILENAME al FTP.${NC}"
-    return 1
-  fi
-
-  # Paso 5: Subir el .sha256 al FTP
-  log "${AZUL}⬆ Subiendo $NGINX_FILENAME.sha256 al FTP...${NC}"
-  curl --silent --ftp-pasv --ftp-ssl --insecure \
-    -u "$FTP_USER:$FTP_PASS" \
-    -T "/tmp/$NGINX_FILENAME.sha256" \
-    "$BASE_FTP/http/Linux/Nginx/$NGINX_FILENAME.sha256"
-
-  if [ $? -eq 0 ]; then
-    log "${VERDE}✅ SHA256 subido correctamente al FTP.${NC}"
-  else
-    log "${AMARILLO}⚠ No se pudo subir el SHA256 al FTP.${NC}"
-  fi
-
-  log "${VERDE}🎉 Nginx preparado en FTP: /http/Linux/Nginx/$NGINX_FILENAME${NC}"
-  RESUMEN+=("${VERDE}✅ Nginx preparado en FTP: $NGINX_FILENAME${NC}")
 }
 
 # ============================================================
 #   NAVEGACIÓN FTP DINÁMICA
 # ============================================================
 navegar_ftp(){
-  probar_ftp
-
-  # Si el servicio es Nginx, preparar automáticamente
-  if [ "$SERVICIO" == "Nginx" ]; then
-    preparar_nginx_ftp
-    if [ $? -ne 0 ]; then
-      log "${ROJO}❌ No se pudo preparar Nginx en el FTP.${NC}"
-      exit 1
-    fi
-  fi
+  probar_ftp || return 1
 
   CURRENT_URL="$BASE_FTP"
-  PREV_URL="$BASE_FTP"
 
   echo -e "${CYAN}"
   echo "  ╔══════════════════════════════════════╗"
@@ -224,7 +188,6 @@ navegar_ftp(){
     [ "$ENTRADA" == "listo" ] && break
 
     ENTRADA=$(echo "$ENTRADA" | sed 's|^/||;s|/$||')
-    PREV_URL="$CURRENT_URL"
     CURRENT_URL="$CURRENT_URL/$ENTRADA"
   done
 
@@ -234,23 +197,27 @@ navegar_ftp(){
   echo "  ──────────────────────────────────────"
   read -p "  📄 Nombre del archivo a descargar: " ARCHIVO
 
-  [ -z "$ARCHIVO" ] && log "${ROJO}❌ No ingresaste un archivo.${NC}" && exit 1
+  [ -z "$ARCHIVO" ] && log "${ROJO}❌ No ingresaste un archivo.${NC}" && return 1
 
   ARCHIVO=$(echo "$ARCHIVO" | sed 's|^/||;s| ||g')
   cd /tmp
 
   log "${AZUL}⬇ Descargando $ARCHIVO...${NC}"
-  curl --ftp-pasv --ftp-ssl --insecure -u "$FTP_USER:$FTP_PASS" -O "$CURRENT_URL/$ARCHIVO"
+  curl --ftp-pasv --ftp-ssl --insecure \
+       -u "$FTP_USER:$FTP_PASS" \
+       -O "$CURRENT_URL/$ARCHIVO" 2>/dev/null
 
-  if [ ! -f "$ARCHIVO" ]; then
+  if [ ! -f "/tmp/$ARCHIVO" ] || [ ! -s "/tmp/$ARCHIVO" ]; then
     log "${ROJO}❌ No se pudo descargar '$ARCHIVO'.${NC}"
-    exit 1
+    return 1
   fi
 
   log "${AZUL}⬇ Descargando checksum...${NC}"
-  curl --ftp-pasv --ftp-ssl --insecure --silent -u "$FTP_USER:$FTP_PASS" -O "$CURRENT_URL/$ARCHIVO.sha256"
+  curl --ftp-pasv --ftp-ssl --insecure --silent \
+       -u "$FTP_USER:$FTP_PASS" \
+       -O "$CURRENT_URL/$ARCHIVO.sha256" 2>/dev/null
 
-  if [ -f "$ARCHIVO.sha256" ]; then
+  if [ -f "/tmp/$ARCHIVO.sha256" ] && [ -s "/tmp/$ARCHIVO.sha256" ]; then
     verificar_hash "$ARCHIVO"
   else
     log "${AMARILLO}⚠ No se encontró .sha256, omitiendo verificación.${NC}"
@@ -265,11 +232,12 @@ navegar_ftp(){
 verificar_hash(){
   local ARCHIVO="$1"
   log "${AZUL}🔐 Verificando integridad SHA256 de $ARCHIVO...${NC}"
+  cd /tmp
   sha256sum -c "$ARCHIVO.sha256"
   if [ $? -ne 0 ]; then
     log "${ROJO}❌ INTEGRIDAD FALLIDA — archivo corrupto o modificado.${NC}"
     RESUMEN+=("${ROJO}❌ Hash FALLIDO: $ARCHIVO${NC}")
-    exit 1
+    return 1
   fi
   log "${VERDE}✅ Integridad SHA256 verificada correctamente.${NC}"
   RESUMEN+=("${VERDE}✅ Hash OK: $ARCHIVO${NC}")
@@ -282,18 +250,18 @@ instalar_manual(){
   log "${AZUL}📦 Instalando $1...${NC}"
   case "$1" in
     *.deb)
-      dpkg -i "$1"
-      apt-get install -f -y
+      dpkg -i "/tmp/$1" 2>/dev/null
+      apt-get install -f -y > /dev/null 2>&1
       ;;
     *.tar.gz)
-      tar -xzf "$1" -C /opt/
+      tar -xzf "/tmp/$1" -C /opt/
       log "${VERDE}✅ Extraído en /opt/${NC}"
       ;;
     *.msi|*.exe)
       log "${AMARILLO}⚠ Instalador Windows (.msi/.exe) no ejecutable en Linux.${NC}"
       ;;
     *.rpm)
-      command -v rpm &>/dev/null && rpm -ivh "$1" || log "${ROJO}❌ rpm no disponible.${NC}"
+      command -v rpm &>/dev/null && rpm -ivh "/tmp/$1" || log "${ROJO}❌ rpm no disponible.${NC}"
       ;;
     *)
       log "${AMARILLO}⚠ Formato no reconocido: $1${NC}"
@@ -302,16 +270,90 @@ instalar_manual(){
 }
 
 # ============================================================
+#   INSTALACIÓN CON FALLBACK (WEB → CACHÉ → FTP)
+# ============================================================
+instalar_paquete(){
+  local PKG="$1"
+  local DEB_NOMBRE="$2"
+  local FTP_RUTA="$3"
+
+  # 1) apt normal
+  log "${AZUL}⚙ Intentando instalar $PKG via apt...${NC}"
+  apt-get install -y "$PKG" > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    log "${VERDE}✅ $PKG instalado via apt.${NC}"
+    return 0
+  fi
+  log "${AMARILLO}⚠ apt falló.${NC}"
+
+  # 2) apt --fix-missing
+  apt-get install -y --fix-missing "$PKG" > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    log "${VERDE}✅ $PKG instalado via apt --fix-missing.${NC}"
+    return 0
+  fi
+
+  # 3) Caché apt
+  local DEB_CACHE
+  DEB_CACHE=$(find /var/cache/apt/archives/ -name "${PKG}_*.deb" 2>/dev/null | head -1)
+  if [ -n "$DEB_CACHE" ]; then
+    log "${CYAN}📦 Encontrado en caché apt: $DEB_CACHE${NC}"
+    dpkg -i "$DEB_CACHE" 2>/dev/null
+    apt-get install -f -y > /dev/null 2>&1
+    dpkg -l "$PKG" 2>/dev/null | grep -q "^ii" && return 0
+  fi
+
+  # 4) .deb local
+  local DEB_LOCAL
+  DEB_LOCAL=$(find /tmp /root /home /var/cache/apt/archives \
+              -maxdepth 4 -name "${PKG}*.deb" 2>/dev/null | head -1)
+  if [ -n "$DEB_LOCAL" ]; then
+    log "${CYAN}📦 Encontrado localmente: $DEB_LOCAL${NC}"
+    dpkg -i "$DEB_LOCAL" 2>/dev/null
+    apt-get install -f -y > /dev/null 2>&1
+    dpkg -l "$PKG" 2>/dev/null | grep -q "^ii" && return 0
+  fi
+
+  # 5) FTP privado
+  if [ -n "$FTP_RUTA" ] && [ -n "$DEB_NOMBRE" ]; then
+    log "${AZUL}⬇ Intentando desde FTP: $DEB_NOMBRE...${NC}"
+    cd /tmp
+    curl --ftp-pasv --ftp-ssl --insecure --connect-timeout 8 --max-time 60 \
+         -u "$FTP_USER:$FTP_PASS" \
+         -O "$BASE_FTP/$FTP_RUTA/$DEB_NOMBRE" 2>/dev/null
+    if [ -f "/tmp/$DEB_NOMBRE" ] && [ -s "/tmp/$DEB_NOMBRE" ]; then
+      log "${VERDE}✅ Descargado desde FTP: $DEB_NOMBRE${NC}"
+      dpkg -i "/tmp/$DEB_NOMBRE" 2>/dev/null
+      apt-get install -f -y > /dev/null 2>&1
+      dpkg -l "$PKG" 2>/dev/null | grep -q "^ii" && return 0
+    fi
+    rm -f "/tmp/$DEB_NOMBRE"
+    log "${AMARILLO}⚠ No se encontró $DEB_NOMBRE en el FTP.${NC}"
+  fi
+
+  log "${ROJO}❌ No se pudo instalar $PKG por ningún método.${NC}"
+  return 1
+}
+
+# ============================================================
 #   INSTALACIÓN WEB (APT)
 # ============================================================
 instalar_web(){
-  log "${AZUL}🌐 Instalando $SERVICIO desde APT...${NC}"
+  log "${AZUL}🌐 Instalando $SERVICIO...${NC}"
   apt-get update -y > /dev/null 2>&1
   case "$SERVICIO" in
-    Apache) apt-get install apache2 -y ;;
-    Nginx)  apt-get install nginx -y ;;
-    Tomcat) apt-get install tomcat10 -y 2>/dev/null || apt-get install tomcat9 -y ;;
-    FTP)    apt-get install vsftpd -y ;;
+    Apache) instalar_paquete "apache2"  "apache_2.4.deb"  "http/Linux/Apache" ;;
+    Nginx)  instalar_paquete "nginx"    "nginx.deb"       "http/Linux/Nginx"  ;;
+    Tomcat) instalar_paquete "tomcat10" "tomcat_10.deb"   "http/Linux/Tomcat" ||
+            instalar_paquete "tomcat9"  "tomcat_10.deb"   "http/Linux/Tomcat" ;;
+    FTP)
+      instalar_paquete "vsftpd" "vsftpd.deb" "http/Linux/FTP"
+      asegurar_vsftpd_conf
+      # Agregar /bin/false a shells permitidos
+      grep -q "^/bin/false$" /etc/shells || echo "/bin/false" >> /etc/shells
+      systemctl enable vsftpd 2>/dev/null
+      systemctl start vsftpd
+      ;;
   esac
 
   if [ $? -eq 0 ]; then
@@ -363,9 +405,9 @@ configurar_ssl_apache(){
   CERT="$CERT_DIR/apache.crt"
   KEY="$CERT_DIR/apache.key"
 
-  log "${AZUL}⚙ Configurando SSL en Apache...${NC}"
+  log "${AZUL}⚙ Configurando SSL en Apache (puerto 443)...${NC}"
 
-  a2enmod ssl > /dev/null 2>&1
+  a2enmod ssl     > /dev/null 2>&1
   a2enmod rewrite > /dev/null 2>&1
   a2enmod headers > /dev/null 2>&1
 
@@ -400,9 +442,9 @@ EOF
 </VirtualHost>
 EOF
 
-  a2ensite reprobados-ssl.conf > /dev/null 2>&1
+  a2ensite reprobados-ssl.conf      > /dev/null 2>&1
   a2ensite reprobados-redirect.conf > /dev/null 2>&1
-  a2dissite 000-default.conf > /dev/null 2>&1
+  a2dissite 000-default.conf        > /dev/null 2>&1
 
   apache2ctl configtest 2>&1 | grep -v "^$"
   systemctl restart apache2
@@ -450,7 +492,8 @@ server {
 }
 EOF
 
-  ln -sf /etc/nginx/sites-available/reprobados-ssl /etc/nginx/sites-enabled/reprobados-ssl
+  ln -sf /etc/nginx/sites-available/reprobados-ssl \
+         /etc/nginx/sites-enabled/reprobados-ssl
 
   nginx -t 2>&1
   systemctl restart nginx
@@ -469,9 +512,7 @@ configurar_ssl_tomcat(){
   KEY="$CERT_DIR/tomcat.key"
 
   TOMCAT_HOME=$(find /etc /opt -maxdepth 3 -name "server.xml" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
-  if [ -z "$TOMCAT_HOME" ]; then
-    TOMCAT_HOME="/etc/tomcat9"
-  fi
+  [ -z "$TOMCAT_HOME" ] && TOMCAT_HOME="/etc/tomcat9"
 
   KEYSTORE="$CERT_DIR/tomcat.p12"
   log "${AZUL}⚙ Creando keystore para Tomcat...${NC}"
@@ -515,7 +556,7 @@ print("OK")
 PYEOF
 
     if [ $? -eq 0 ]; then
-      log "${VERDE}✅ Conector HTTPS 8444 añadido a Tomcat10 correctamente.${NC}"
+      log "${VERDE}✅ Conector HTTPS 8444 añadido a Tomcat correctamente.${NC}"
     else
       log "${ROJO}❌ Error editando server.xml${NC}"
       return 1
@@ -525,7 +566,7 @@ PYEOF
   fi
 
   systemctl restart tomcat9 2>/dev/null || systemctl restart tomcat10 2>/dev/null
-  sleep 10
+  sleep 5
   log "${VERDE}🌐 Tomcat HTTPS disponible en: https://IP:8444${NC}"
   verificar_servicio "Tomcat" 8444
 }
@@ -541,12 +582,42 @@ configurar_ssl_vsftpd(){
 
   log "${AZUL}⚙ Configurando FTPS en vsftpd...${NC}"
 
-  VSFTPD_CONF="/etc/vsftpd.conf"
-  cp "$VSFTPD_CONF" "${VSFTPD_CONF}.bak"
+  # Instalar vsftpd si no está
+  if ! command -v vsftpd &>/dev/null; then
+    log "${AMARILLO}⚠ vsftpd no instalado. Instalando...${NC}"
+    instalar_paquete "vsftpd" "vsftpd.deb" "http/Linux/FTP"
+    if [ $? -ne 0 ]; then
+      log "${ROJO}❌ No se pudo instalar vsftpd.${NC}"
+      return
+    fi
+  fi
 
-  sed -i '/ssl_enable\|rsa_cert_file\|rsa_private_key_file\|force_local_data_ssl\|force_local_logins_ssl\|ssl_tlsv1\|ssl_sslv2\|ssl_sslv3\|require_ssl_reuse\|ssl_ciphers/d' "$VSFTPD_CONF"
+  # Agregar /bin/false a shells permitidos
+  grep -q "^/bin/false$" /etc/shells || echo "/bin/false" >> /etc/shells
 
-  cat >> "$VSFTPD_CONF" <<EOF
+  # Quitar usuario de lista negra
+  sed -i '/^usuario$/d' /etc/ftpusers 2>/dev/null
+
+  # Escribir vsftpd.conf limpio y completo
+  mkdir -p /var/run/vsftpd/empty
+  cat > /etc/vsftpd.conf <<EOF
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+dirmessage_enable=YES
+use_localtime=YES
+xferlog_enable=YES
+connect_from_port_20=YES
+chroot_local_user=YES
+allow_writeable_chroot=YES
+secure_chroot_dir=/var/run/vsftpd/empty
+pam_service_name=vsftpd
+pasv_enable=YES
+pasv_min_port=40000
+pasv_max_port=40100
 
 # ── SSL/TLS (FTPS) ──────────────────────────
 ssl_enable=YES
@@ -561,6 +632,7 @@ require_ssl_reuse=NO
 ssl_ciphers=HIGH
 EOF
 
+  systemctl enable vsftpd > /dev/null 2>&1
   systemctl restart vsftpd
   verificar_servicio "vsftpd/FTPS" 21
 }
@@ -577,7 +649,7 @@ verificar_servicio(){
     log "${VERDE}✅ $NOMBRE escuchando en puerto $PUERTO.${NC}"
     RESUMEN+=("${VERDE}✅ SSL ACTIVO: $NOMBRE → puerto $PUERTO${NC}")
   else
-    log "${AMARILLO}⚠ $NOMBRE no detectado en puerto $PUERTO (puede tardar unos segundos).${NC}"
+    log "${AMARILLO}⚠ $NOMBRE no detectado en puerto $PUERTO.${NC}"
     RESUMEN+=("${AMARILLO}⚠ SSL PENDIENTE: $NOMBRE → puerto $PUERTO${NC}")
   fi
 }
@@ -641,6 +713,20 @@ mostrar_resumen(){
 #   MAIN
 # ============================================================
 verificar_deps
+
+echo -e "${CYAN}"
+echo "  ┌──────────────────────────────────────────┐"
+echo "  │  Configuración del servidor FTP          │"
+echo "  │  (dejar vacío usa el valor por defecto)  │"
+echo "  └──────────────────────────────────────────┘"
+echo -e "${NC}"
+read -p "  IP del servidor FTP [$FTP_SERVER]: " INPUT_IP
+[ -n "$INPUT_IP" ] && FTP_SERVER="$INPUT_IP" && BASE_FTP="ftp://$FTP_SERVER"
+read -p "  Usuario FTP [$FTP_USER]: " INPUT_USER
+[ -n "$INPUT_USER" ] && FTP_USER="$INPUT_USER"
+read -p "  Contraseña FTP [$FTP_PASS]: " INPUT_PASS
+[ -n "$INPUT_PASS" ] && FTP_PASS="$INPUT_PASS"
+log "${VERDE}✅ FTP configurado: $FTP_USER@$FTP_SERVER${NC}"
 
 while true; do
   menu_principal
